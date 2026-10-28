@@ -34,6 +34,8 @@ class Transfer extends Model
     protected function casts(): array
     {
         return [
+            'sender_wallet_id' => 'integer',
+            'receiver_wallet_id' => 'integer',
             'amount' => 'integer',
             'status' => TransferStatus::class,
         ];
