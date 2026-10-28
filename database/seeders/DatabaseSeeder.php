@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\User;
+use App\Models\Wallet;
 use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
 
@@ -11,15 +12,15 @@ class DatabaseSeeder extends Seeder
     use WithoutModelEvents;
 
     /**
-     * Seed the application's database.
+     * Seed two demo users with funded wallets (balances in paisa).
      */
     public function run(): void
     {
-        // User::factory(10)->create();
-
-        User::factory()->create([
-            'name' => 'Test User',
-            'email' => 'test@example.com',
-        ]);
+        foreach (['alice@example.com' => 1_000_000, 'bob@example.com' => 250_000] as $email => $balance) {
+            Wallet::factory()
+                ->withBalance($balance)
+                ->for(User::factory()->state(['email' => $email]))
+                ->create();
+        }
     }
 }
