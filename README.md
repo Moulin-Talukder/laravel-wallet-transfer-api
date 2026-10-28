@@ -4,6 +4,7 @@ A small Laravel API that transfers money between user wallets: safely, exactly o
 
 > **This is a standalone portfolio sample.** It was written from scratch to show how I approach money-moving code.
 > It is not employer or client code and does not contain any proprietary logic.
+> It was built with Claude Code as an AI pair programmer; I reviewed every change, and verified it with 31 feature tests (SQLite and MySQL), a MySQL concurrency stress test, and deliberate fault-injection experiments.
 
 The scope is deliberately small (one service, three endpoints) so the important parts are easy to review:
 integer money, row locking, idempotency, an append-only ledger, authorization and validation.
