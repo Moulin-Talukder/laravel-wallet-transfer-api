@@ -380,6 +380,32 @@ class TransferTest extends TestCase
         $this->postTransfer($sender->user, $payload)->assertTooManyRequests();
     }
 
+    public function test_read_endpoints_are_rate_limited(): void
+    {
+        Sanctum::actingAs(Wallet::factory()->create()->user);
+
+        for ($i = 0; $i < 30; $i++) {
+            $this->getJson('/api/wallet')->assertOk();
+            $this->getJson('/api/transfers')->assertOk();
+        }
+
+        $this->getJson('/api/wallet')->assertTooManyRequests();
+    }
+
+    public function test_reads_do_not_consume_the_transfer_rate_limit(): void
+    {
+        $sender = Wallet::factory()->withBalance(10_000)->create();
+        $receiver = Wallet::factory()->create();
+
+        Sanctum::actingAs($sender->user);
+        for ($i = 0; $i < 15; $i++) {
+            $this->getJson('/api/wallet')->assertOk();
+        }
+
+        $this->postTransfer($sender->user, ['receiver_email' => $receiver->user->email, 'amount' => 1_000])
+            ->assertCreated();
+    }
+
     /**
      * @param  array<string, mixed>  $payload
      * @param  array<string, string>|null  $headers  Defaults to a fresh Idempotency-Key.
