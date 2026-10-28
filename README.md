@@ -12,7 +12,7 @@ integer money, row locking, idempotency, an append-only ledger, authorization an
 
 - PHP 8.3+ / Laravel 13
 - Laravel Sanctum (API tokens)
-- SQLite by default (see the [concurrency note](#a-note-on-sqlite-and-concurrency))
+- SQLite by default for development and tests; MySQL for the [concurrency test](#concurrency-test)
 - PHPUnit feature tests
 
 ## Getting started
@@ -171,12 +171,97 @@ a **debit** on the sender and a **credit** on the receiver, each with `balance_a
 - [`TransferResource`](app/Http/Resources/TransferResource.php) exposes only a public UUID `reference`.
   Auto-increment ids (which would reveal transfer volume) and idempotency keys never leave the server.
 
-## A note on SQLite and concurrency
+## Concurrency test
 
-**SQLite ignores `FOR UPDATE`.** It locks the whole database for writes instead, so the tests here prove the business rules
-but **not** the row-locking behaviour. To test real concurrency (parallel A→B / B→A transfers, simultaneous retries
-with the same key), run the app on MySQL or PostgreSQL and fire concurrent requests, for example from parallel
-processes in a test or with a load tool such as `k6`.
+**SQLite ignores `FOR UPDATE`.** It locks the whole database for writes instead, so the PHPUnit suite proves the business rules
+but **not** the row locking. [`wallet:stress-test`](app/Console/Commands/WalletStressTest.php) proves it on MySQL with real,
+simultaneous HTTP requests, each sent by its own `curl` process to a multi-worker server.
+
+### Running it
+
+```bash
+# 1. A MySQL database and user (once)
+sudo mysql -e "CREATE DATABASE wallet_transfer_api; CREATE USER 'wallet'@'127.0.0.1' IDENTIFIED BY 'secret';
+               GRANT ALL ON wallet_transfer_api.* TO 'wallet'@'127.0.0.1';"
+
+# 2. A separate environment file, so your normal .env stays on SQLite
+cp .env.stress.example .env.stress          # set DB_PASSWORD
+php artisan key:generate --env=stress
+php artisan migrate --env=stress
+
+# 3. Terminal 1: a server with 24 PHP workers (from PHP_CLI_SERVER_WORKERS in .env.stress)
+APP_ENV=stress php artisan serve --no-reload
+
+# 4. Terminal 2: the test
+php artisan wallet:stress-test --env=stress
+```
+
+`--no-reload` is required: without it, `artisan serve` ignores `PHP_CLI_SERVER_WORKERS` and runs a single worker,
+which would process the requests one after another and prove nothing. `.env.stress` also raises the transfer
+rate limit. Otherwise 10 of the 20 requests would get a `429`, and "exactly 10 succeeded" would be true for the wrong reason.
+
+### What it checks
+
+**Scenario 1, double spend:** a wallet holding 100 BDT receives 20 simultaneous requests to send 10 BDT.
+
+- exactly 10 succeed, and the other 10 fail with `INSUFFICIENT_BALANCE`. Any `429` or `500` is a failure
+- the final balance is 0 and no `balance_after` is negative
+- the sender's debit rows read `balance_after` = 9000, 8000, …, 0 in order, so every debit saw the previous one and no update was lost
+- the sum of ledger debits equals the money that left the wallet
+
+**Scenario 2, deadlocks:** 20 × A→B and 20 × B→A at the same time.
+
+- all 40 succeed, and the server logs no MySQL `1213 Deadlock found` errors
+- for both wallets, opening balance + credits − debits = balance
+
+The command also prints MySQL's `Innodb_row_lock_waits` counter. A non-zero value means transactions really did
+collide and wait on the row locks, so the requests were not just being handled one at a time.
+
+### Results
+
+MySQL 8.4, 24 PHP workers, WSL2:
+
+```text
+Scenario 1: 20 × 10 BDT from one wallet holding 100 BDT
+ Processes launched ................................................ 20
+ Average requests in flight ...................................... 17.2
+ Row lock waits (Innodb_row_lock_waits) ........................... +36
+ Responses ......................... 201 ×10, 422 INSUFFICIENT_BALANCE ×10
+ Exactly 10 transfers succeeded ............................ PASS 10 × 201
+ Every other request was rejected with INSUFFICIENT_BALANCE  PASS 10 × 422
+ Sender balance is 0 ........................................ PASS 0 paisa
+ Balance never went negative (min balance_after) ............ PASS 0 paisa
+ Each debit saw the previous one  PASS 9000, 8000, 7000, 6000, 5000, 4000, 3000, 2000, 1000, 0
+ Sum of ledger debits equals money that left the wallet  PASS 10000 = 10000 paisa
+ Receiver balance equals its ledger credits ....... PASS 10000 = 10000 paisa
+
+Scenario 2: 20 × A->B and 20 × B->A in parallel
+ Processes launched ................................................ 40
+ Average requests in flight ...................................... 19.0
+ Row lock waits (Innodb_row_lock_waits) ........................... +42
+ Responses ............................................... 201 ×40
+ Every transfer succeeded (no deadlock 500s) ......... PASS 40 / 40 × 201
+ Server logged no deadlocks ........................... PASS 0 × MySQL 1213
+ Wallet A: opening + credits − debits = balance  PASS 20000 + 20000 − 20000 = 20000
+ Wallet B: opening + credits − debits = balance  PASS 20000 + 20000 − 20000 = 20000
+
+ SUCCESS  All concurrency checks passed.
+```
+
+### Proof that the checks can fail
+
+A test that never fails proves nothing, so I temporarily broke `TransferService` twice and re-ran the command.
+These changes were not committed.
+
+| Change                                     | Result                                                                                                                                                                        |
+|--------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Removed `lockForUpdate()`                  | Scenario 1: only 5 × 201, 15 × 500 (deadlocks), and `balance_after` read **9000, 9000, 7000, 7000, 7000**: stale reads produced ledger rows for balances that never existed |
+| Locked sender first (removed the id sort)  | Scenario 2: 20 × 201, **20 × 500**, and 20 MySQL `1213` deadlocks were logged                                                                                                    |
+
+Without `FOR UPDATE`, the `INSERT INTO transfers` takes **shared** locks on both wallet rows through the foreign keys,
+and the following `UPDATE wallets` needs **exclusive** locks on them. Two transactions doing this at once deadlock each other.
+In both experiments the ledger still balanced, because every failed transaction rolled back completely. But users got errors, and in
+the first case the audit trail recorded balances that never existed.
 
 ## What I would add in production
 
