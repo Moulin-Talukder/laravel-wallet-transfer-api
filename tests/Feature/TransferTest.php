@@ -205,6 +205,28 @@ class TransferTest extends TestCase
         $this->assertDatabaseEmpty('transfers');
     }
 
+    public function test_cannot_transfer_to_self_using_different_email_case(): void
+    {
+        $sender = Wallet::factory()->withBalance(10_000)->create();
+
+        $this->postTransfer($sender->user, ['receiver_email' => '  '.strtoupper($sender->user->email).' ', 'amount' => 1_000])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['receiver_email' => 'You cannot transfer money to yourself.']);
+
+        $this->assertDatabaseEmpty('transfers');
+    }
+
+    public function test_receiver_email_is_matched_case_insensitively(): void
+    {
+        $sender = Wallet::factory()->withBalance(10_000)->create();
+        $receiver = Wallet::factory()->for(User::factory()->state(['email' => 'Bob.Smith@Example.com']))->create();
+
+        $this->postTransfer($sender->user, ['receiver_email' => 'BOB.SMITH@example.COM', 'amount' => 1_000])
+            ->assertCreated();
+
+        $this->assertSame(1_000, $receiver->fresh()->balance);
+    }
+
     public function test_unknown_receiver_is_rejected(): void
     {
         $sender = Wallet::factory()->withBalance(10_000)->create();

@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class StoreTransferRequest extends FormRequest
@@ -19,13 +20,16 @@ class StoreTransferRequest extends FormRequest
 
     /**
      * The header is the only source of the key; any idempotency_key in the body is overwritten.
+     * Emails are compared lowercased so case differences cannot bypass the self-transfer rule.
      */
     protected function prepareForValidation(): void
     {
         $key = $this->header('Idempotency-Key');
+        $email = $this->input('receiver_email');
 
         $this->merge([
             'idempotency_key' => is_string($key) ? strtolower(trim($key)) : null,
+            'receiver_email' => is_string($email) ? Str::lower(trim($email)) : $email,
         ]);
     }
 
@@ -43,7 +47,7 @@ class StoreTransferRequest extends FormRequest
                 'string',
                 'email',
                 Rule::exists('users', 'email'),
-                Rule::notIn([$this->user()->email]),
+                Rule::notIn([Str::lower($this->user()->email)]),
             ],
             // Paisa: 1 BDT minimum, 50,000 BDT maximum per transfer.
             'amount' => ['required', 'integer', 'min:100', 'max:5000000'],
