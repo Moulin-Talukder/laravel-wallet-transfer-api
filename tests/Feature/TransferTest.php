@@ -25,6 +25,21 @@ class TransferTest extends TestCase
         $this->postJson('/api/transfers', [], ['Idempotency-Key' => (string) Str::uuid()])->assertUnauthorized();
     }
 
+    public function test_api_tokens_expire_after_24_hours(): void
+    {
+        $wallet = Wallet::factory()->create();
+        $headers = ['Authorization' => 'Bearer '.$wallet->user->createToken('test')->plainTextToken];
+
+        $this->travel(24 * 60 - 1)->minutes();
+        $this->getJson('/api/wallet', $headers)->assertOk();
+
+        // The guard caches the resolved user between requests within one test.
+        $this->app['auth']->forgetGuards();
+
+        $this->travel(2)->minutes();
+        $this->getJson('/api/wallet', $headers)->assertUnauthorized();
+    }
+
     public function test_user_can_view_own_wallet(): void
     {
         $wallet = Wallet::factory()->withBalance(12_345)->create();
