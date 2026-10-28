@@ -42,11 +42,13 @@ php artisan test
 All endpoints require `Authorization: Bearer <token>` and `Accept: application/json`.
 **All amounts are integers in paisa** (1 BDT = 100 paisa).
 
-| Method | Path             | Description                                                         |
-|--------|------------------|---------------------------------------------------------------------|
-| GET    | `/api/wallet`    | Your own wallet balance                                             |
-| GET    | `/api/transfers` | Transfers you sent or received, newest first, 20 per page           |
-| POST   | `/api/transfers` | Send money. Requires an `Idempotency-Key` header. Limited to 10/min |
+| Method | Path             | Description                                               | Rate limit |
+|--------|------------------|-----------------------------------------------------------|------------|
+| GET    | `/api/wallet`    | Your own wallet balance                                   | 60/min     |
+| GET    | `/api/transfers` | Transfers you sent or received, newest first, 20 per page | 60/min     |
+| POST   | `/api/transfers` | Send money. Requires an `Idempotency-Key` header          | 10/min     |
+
+Rate limits are per user, and reads and transfers have separate counters (see [Security notes](#security-notes)).
 
 ### Example: send 1,500 BDT to Bob
 
@@ -87,10 +89,10 @@ Idempotent-Replayed: true
 |--------|------------------------------------------------------------------------------------------|
 | 201    | Transfer created                                                                         |
 | 200    | Idempotent replay of an earlier transfer (`Idempotent-Replayed: true`)                   |
-| 401    | Missing or invalid token                                                                 |
+| 401    | Missing, invalid or expired token (tokens expire after 24 hours)                         |
 | 403    | Your wallet is frozen                                                                    |
 | 422    | Validation error (`errors` object) or business-rule rejection (`code`, see below)        |
-| 429    | More than 10 transfer requests per minute                                                |
+| 429    | Rate limit exceeded: 10 transfers or 60 reads per minute                                 |
 
 Business-rule rejections share one stable shape, so clients can branch on `code` rather than on the message:
 
@@ -155,7 +157,7 @@ a **debit** on the sender and a **credit** on the receiver, each with `balance_a
 
 ### Authorization
 
-- Every route is behind `auth:sanctum`.
+- Every route is behind `auth:sanctum`. Tokens expire after 24 hours (`SANCTUM_EXPIRATION`, in minutes).
 - [`WalletPolicy`](app/Policies/WalletPolicy.php) decides who may `view` a wallet and who may `transferFrom` it
   (the owner, and only while the wallet is not frozen). A frozen sender gets `403` before validation even runs.
 - Controllers use `Gate::authorize()`, because the Laravel 11+ base controller no longer has an `authorize()` helper.
@@ -166,7 +168,10 @@ a **debit** on the sender and a **credit** on the receiver, each with `balance_a
 - [`StoreTransferRequest`](app/Http/Requests/StoreTransferRequest.php) copies the `Idempotency-Key` header into the
   validated data. The header is the only source: an `idempotency_key` sent in the body is overwritten.
 - `amount` must be an integer between 100 and 5,000,000 paisa (1 to 50,000 BDT). `"150.75"` and `100.5` are rejected, not rounded.
-- `receiver_email` must exist and must not be the sender's own email. The service checks `SAME_WALLET` again in case the email check is bypassed (for example, case differences on MySQL).
+- `receiver_email` is trimmed and lowercased, then must exist and must not equal the sender's lowercased email,
+  so `ALICE@example.com` cannot get around the self-transfer rule. User emails are stored lowercased,
+  so lookups behave the same on case-sensitive SQLite and case-insensitive MySQL.
+  The service still checks `SAME_WALLET` as a final guard.
 - `balance` and `is_frozen` are not mass-assignable on `Wallet`.
 - [`TransferResource`](app/Http/Resources/TransferResource.php) exposes only a public UUID `reference`.
   Auto-increment ids (which would reveal transfer volume) and idempotency keys never leave the server.
@@ -263,6 +268,27 @@ and the following `UPDATE wallets` needs **exclusive** locks on them. Two transa
 In both experiments the ledger still balanced, because every failed transaction rolled back completely. But users got errors, and in
 the first case the audit trail recorded balances that never existed.
 
+## Security notes
+
+These were found in a review of the first version and have since been fixed, each with a test:
+
+- **Tokens never expired.** Sanctum's default `expiration` is `null`. Tokens now expire after 24 hours. The test uses a real
+  bearer token, because `Sanctum::actingAs()` skips the expiry check.
+- **The self-transfer check was case-sensitive.** On MySQL, `ALICE@example.com` got past the rule and was only stopped
+  by the service's `SAME_WALLET` check. Emails are now normalized before validation and stored lowercased.
+- **Read endpoints had no rate limit.** They now allow 60 requests per minute.
+- **Rate limiters shared one counter.** Plain `throttle:X,Y` middleware keys every limiter on the user id alone, so adding
+  `throttle:60,1` to the reads would have let 10 balance checks block a transfer. The app now uses named limiters
+  (`transfers`, `wallet-reads`) with separate counters, configured in [`config/wallet.php`](config/wallet.php).
+
+Known risks that are still open:
+
+- **Email enumeration.** The `exists` rule on `receiver_email` reveals whether an address is registered.
+  The 10/min limit slows this down. A production app would use a separate "resolve recipient" step with its own tight limit, or a generic error.
+- **The ledger is append-only only in application code.** Raw queries can still change it (see below).
+- **`APP_DEBUG=true` in `.env.example`** is the Laravel default for local development. It must be `false` in production,
+  or error pages will show stack traces.
+
 ## What I would add in production
 
 - **Queued notifications dispatched `afterCommit`.** "You received 1,500 BDT" must never be sent for a transfer that was rolled back.
@@ -270,7 +296,5 @@ the first case the audit trail recorded balances that never existed.
 - **OTP / step-up confirmation** for transfers above a threshold.
 - **A scheduled ledger reconciliation job** that checks every wallet's balance against the sum of its ledger rows and alerts on drift.
 - **Signed gateway webhooks** for top-ups and withdrawals: verify the HMAC signature, reject stale timestamps, and process each event idempotently.
-- **Token expiry** (`sanctum.expiration` is `null` by default) and a real login/refresh flow.
-- **Less email enumeration.** The `exists` rule on `receiver_email` reveals whether an address is registered.
-  The 10/min limit slows this down. A production app would use a separate "resolve recipient" step with its own tight limit, or a generic error.
-- Database-level protection for the ledger (revoke `UPDATE`/`DELETE` from the app user), audit logging, and tests that run concurrent transfers on MySQL in CI.
+- **A login and token refresh flow**, instead of creating tokens by hand.
+- Database-level protection for the ledger (revoke `UPDATE`/`DELETE` from the app user), audit logging, and `wallet:stress-test` running against MySQL in CI.
