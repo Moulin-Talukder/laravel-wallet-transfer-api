@@ -8,7 +8,10 @@ use Illuminate\Support\Facades\Route;
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:login');
 
 Route::middleware('auth:sanctum')->group(function () {
+    Route::post('/logout', [AuthController::class, 'logout']);
+
     Route::middleware('throttle:wallet-reads')->group(function () {
+        Route::get('/me', [AuthController::class, 'me']);
         Route::get('/wallet', [WalletController::class, 'show']);
         Route::get('/transfers', [TransferController::class, 'index']);
     });

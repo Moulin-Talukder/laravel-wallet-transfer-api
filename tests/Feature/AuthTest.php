@@ -35,6 +35,42 @@ class AuthTest extends TestCase
             ->assertOk();
     }
 
+    public function test_me_returns_200_with_only_name_and_email(): void
+    {
+        $user = User::factory()->create(['name' => 'Alice Rahman', 'email' => 'alice@example.com']);
+        $token = $user->createToken('frontend')->plainTextToken;
+
+        $this->getJson('/api/me', ['Authorization' => 'Bearer '.$token])
+            ->assertOk()
+            ->assertExactJson(['data' => ['name' => 'Alice Rahman', 'email' => 'alice@example.com']]);
+    }
+
+    public function test_logout_returns_204_and_revokes_only_the_current_token(): void
+    {
+        $user = User::factory()->create();
+        $loggingOut = $user->createToken('laptop')->plainTextToken;
+        $otherDevice = $user->createToken('phone')->plainTextToken;
+
+        $this->postJson('/api/logout', [], ['Authorization' => 'Bearer '.$loggingOut])
+            ->assertNoContent();
+
+        // The guard caches the resolved user between requests within one test.
+        $this->app['auth']->forgetGuards();
+        $this->getJson('/api/me', ['Authorization' => 'Bearer '.$loggingOut])->assertUnauthorized();
+
+        $this->app['auth']->forgetGuards();
+        $this->getJson('/api/me', ['Authorization' => 'Bearer '.$otherDevice])->assertOk();
+
+        $this->assertDatabaseMissing('personal_access_tokens', ['name' => 'laptop']);
+        $this->assertDatabaseHas('personal_access_tokens', ['name' => 'phone']);
+    }
+
+    public function test_logout_and_me_return_401_without_a_token(): void
+    {
+        $this->postJson('/api/logout')->assertUnauthorized();
+        $this->getJson('/api/me')->assertUnauthorized();
+    }
+
     public function test_login_with_wrong_password_returns_422_with_generic_message(): void
     {
         $user = User::factory()->create(['password' => self::PASSWORD]);
