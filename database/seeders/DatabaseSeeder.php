@@ -19,7 +19,7 @@ class DatabaseSeeder extends Seeder
         foreach (['alice@example.com' => 1_000_000, 'bob@example.com' => 250_000] as $email => $balance) {
             Wallet::factory()
                 ->withBalance($balance)
-                ->for(User::factory()->state(['email' => $email]))
+                ->for(User::factory()->state(['email' => $email, 'password' => 'password']))
                 ->create();
         }
     }
