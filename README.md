@@ -48,6 +48,13 @@ Run the tests:
 php artisan test
 ```
 
+## Frontend
+
+[wallet-transfer-web](https://github.com/Moulin-Talukder/wallet-transfer-web) is a Next.js frontend for this API:
+sign in, check the balance, and send money with one `Idempotency-Key` per payment attempt, reused on every retry.
+It keeps the Sanctum token server-side in an httpOnly cookie (backend-for-frontend pattern), so the browser never calls
+this API directly. Its README explains how to run the two together.
+
 ## API
 
 All endpoints except `POST /api/login` require `Authorization: Bearer <token>`. Send `Accept: application/json` with every request.
