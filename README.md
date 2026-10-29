@@ -4,7 +4,7 @@ A small Laravel API that transfers money between user wallets: safely, exactly o
 
 > **This is a standalone portfolio sample.** It was written from scratch to show how I approach money-moving code.
 > It is not employer or client code and does not contain any proprietary logic.
-> It was built with Claude Code as an AI pair programmer; I reviewed every change, and verified it with 31 feature tests (SQLite and MySQL), a MySQL concurrency stress test, and deliberate fault-injection experiments.
+> It was built with Claude Code as an AI pair programmer; I reviewed every change, and verified it with 44 feature tests (SQLite and MySQL), a MySQL concurrency stress test, and deliberate fault-injection experiments.
 
 The scope is deliberately small (one service, three endpoints) so the important parts are easy to review:
 integer money, row locking, idempotency, an append-only ledger, authorization and validation.
@@ -26,11 +26,21 @@ php artisan migrate --seed   # creates alice@example.com (10,000 BDT) and bob@ex
 php artisan serve
 ```
 
-Create a token for Alice:
+> **Demo only:** both seeded users have the password `password`. Never run this seeder against a real database.
+
+Log in as Alice to get a token:
 
 ```bash
-php artisan tinker --execute 'echo App\Models\User::firstWhere("email", "alice@example.com")->createToken("demo")->plainTextToken;'
+curl -X POST http://127.0.0.1:8000/api/login \
+  -H "Accept: application/json" -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com", "password": "password"}'
 ```
+
+```json
+{ "token": "1|<40-character secret>", "token_type": "Bearer", "expires_at": "2026-10-30T09:00:00+00:00" }
+```
+
+A browser frontend may call the API only from `FRONTEND_URL` (default `http://localhost:3000`). Set it in `.env`.
 
 Run the tests:
 
@@ -40,16 +50,19 @@ php artisan test
 
 ## API
 
-All endpoints require `Authorization: Bearer <token>` and `Accept: application/json`.
+All endpoints except `POST /api/login` require `Authorization: Bearer <token>`. Send `Accept: application/json` with every request.
 **All amounts are integers in paisa** (1 BDT = 100 paisa).
 
 | Method | Path             | Description                                               | Rate limit |
 |--------|------------------|-----------------------------------------------------------|------------|
+| POST   | `/api/login`     | Exchange `{email, password}` for a token valid for 24 hours | 5/min per email + IP |
+| POST   | `/api/logout`    | Revoke the token used for this request (other devices stay signed in) | none |
+| GET    | `/api/me`        | Your name and email                                       | 60/min     |
 | GET    | `/api/wallet`    | Your own wallet balance                                   | 60/min     |
 | GET    | `/api/transfers` | Transfers you sent or received, newest first, 20 per page | 60/min     |
 | POST   | `/api/transfers` | Send money. Requires an `Idempotency-Key` header          | 10/min     |
 
-Rate limits are per user, and reads and transfers have separate counters (see [Security notes](#security-notes)).
+Rate limits are per user (login: per email and IP address), and each limiter has its own counter (see [Security notes](#security-notes)).
 
 ### Example: send 1,500 BDT to Bob
 
@@ -89,11 +102,12 @@ Idempotent-Replayed: true
 | Status | When                                                                                     |
 |--------|------------------------------------------------------------------------------------------|
 | 201    | Transfer created                                                                         |
+| 204    | Logged out                                                                               |
 | 200    | Idempotent replay of an earlier transfer (`Idempotent-Replayed: true`)                   |
 | 401    | Missing, invalid or expired token (tokens expire after 24 hours)                         |
 | 403    | Your wallet is frozen                                                                    |
-| 422    | Validation error (`errors` object) or business-rule rejection (`code`, see below)        |
-| 429    | Rate limit exceeded: 10 transfers or 60 reads per minute                                 |
+| 422    | Validation error (`errors` object), business-rule rejection (`code`, see below), or `Invalid credentials.` on login |
+| 429    | Rate limit exceeded: 5 logins, 10 transfers or 60 reads per minute                       |
 
 Business-rule rejections share one stable shape, so clients can branch on `code` rather than on the message:
 
@@ -282,6 +296,15 @@ These were found in a review of the first version and have since been fixed, eac
   `throttle:60,1` to the reads would have let 10 balance checks block a transfer. The app now uses named limiters
   (`transfers`, `wallet-reads`) with separate counters, configured in [`config/wallet.php`](config/wallet.php).
 
+The login flow was built with the same concerns in mind:
+
+- **Login does not reveal which emails exist.** A wrong password and an unknown email return the same
+  `422 Invalid credentials.` response. Credentials are checked by the web guard's timebox, so every failure also takes the same minimum time (200 ms).
+- **Login is rate limited per lowercased email and IP address** (5/min), so an attacker on one IP can't lock out other users,
+  and one victim's email can't be brute-forced from a single address.
+- **CORS allows only `FRONTEND_URL`.** Laravel's published default allows every origin. Only `api/*` is covered, without credentials,
+  because the API uses bearer tokens rather than cookies.
+
 Known risks that are still open:
 
 - **Email enumeration.** The `exists` rule on `receiver_email` reveals whether an address is registered.
@@ -297,5 +320,5 @@ Known risks that are still open:
 - **OTP / step-up confirmation** for transfers above a threshold.
 - **A scheduled ledger reconciliation job** that checks every wallet's balance against the sum of its ledger rows and alerts on drift.
 - **Signed gateway webhooks** for top-ups and withdrawals: verify the HMAC signature, reject stale timestamps, and process each event idempotently.
-- **A login and token refresh flow**, instead of creating tokens by hand.
+- **Token refresh and rotation**, and an endpoint to list and revoke the tokens of other devices.
 - Database-level protection for the ledger (revoke `UPDATE`/`DELETE` from the app user), audit logging, and `wallet:stress-test` running against MySQL in CI.
