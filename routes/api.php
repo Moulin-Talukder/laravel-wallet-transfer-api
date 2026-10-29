@@ -1,8 +1,11 @@
 <?php
 
+use App\Http\Controllers\AuthController;
 use App\Http\Controllers\TransferController;
 use App\Http\Controllers\WalletController;
 use Illuminate\Support\Facades\Route;
+
+Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:login');
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::middleware('throttle:wallet-reads')->group(function () {
